@@ -23,6 +23,7 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "package": "com.musika.app",
+      "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",
         "WRITE_EXTERNAL_STORAGE",
@@ -35,7 +36,15 @@
     },
     "plugins": [
       "expo-router",
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow Musika to save album art.",
+          "savePhotosPermission": "Allow Musika to save album art.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ]
     ]
   }
 }

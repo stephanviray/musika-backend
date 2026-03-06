@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: musika-backend
+    runtime: node
+    buildCommand: |
+      npm install
+      apt-get update && apt-get install -y python3 ffmpeg
+      pip3 install --break-system-packages yt-dlp || python3 -m pip install yt-dlp
+    startCommand: node proxy.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: YTDLP_PATH
+        value: yt-dlp
+      - key: RENDER
+        value: "true"

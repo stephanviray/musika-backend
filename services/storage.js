@@ -1,7 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { saveToDevice } from './downloader';
 
 const PLAYLISTS_KEY = '@musika_playlists';
 const TRACKS_KEY = '@musika_tracks';
+const FAVORITES_KEY = '@musika_favorites';
+const RECENTLY_PLAYED_KEY = '@musika_recently_played';
+const MAX_RECENT = 30;
 
 // Generate a simple unique ID
 function generateId() {
@@ -155,4 +159,149 @@ export async function getStats() {
         totalDuration: tracks.reduce((sum, t) => sum + (t.duration || 0), 0),
         totalSize: downloaded.reduce((sum, t) => sum + (t.fileSize || 0), 0),
     };
+}
+
+export async function moveTracksToPlaylist(trackIds, targetPlaylistId) {
+    const tracks = await getAllTracks();
+    const movedTracks = [];
+
+    for (const trackId of trackIds) {
+        const src = tracks.find(t => t.id === trackId);
+        if (!src) continue;
+        const targetCount = tracks.filter(t => t.playlistId === targetPlaylistId).length + movedTracks.length;
+        movedTracks.push({
+            ...src,
+            id: generateId(),
+            playlistId: targetPlaylistId,
+            order: targetCount,
+            createdAt: new Date().toISOString(),
+        });
+    }
+
+    tracks.push(...movedTracks);
+    await AsyncStorage.setItem(TRACKS_KEY, JSON.stringify(tracks));
+
+    const targetPlaylist = await getPlaylist(targetPlaylistId);
+    const targetName = targetPlaylist?.name || 'Musika';
+
+    const targetTracks = tracks.filter(t => t.playlistId === targetPlaylistId);
+    await updatePlaylist(targetPlaylistId, {
+        trackCount: targetTracks.length,
+        totalDuration: targetTracks.reduce((sum, t) => sum + (t.duration || 0), 0),
+        coverArt: movedTracks[0]?.thumbnail || targetPlaylist?.coverArt,
+    });
+
+    // Also save copied files to the target playlist's folder on device
+    for (const t of movedTracks) {
+        if (t.filePath && t.downloaded) {
+            const safeName = (t.title || 'track').replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 50).trim();
+            await saveToDevice(t.filePath, `${safeName}.mp3`, targetName);
+        }
+    }
+
+    return movedTracks;
+}
+
+export async function deleteMultipleTracks(trackIds) {
+    const tracks = await getAllTracks();
+    const affectedPlaylists = new Set();
+    for (const id of trackIds) {
+        const t = tracks.find(t => t.id === id);
+        if (t) affectedPlaylists.add(t.playlistId);
+    }
+    const filtered = tracks.filter(t => !trackIds.includes(t.id));
+    await AsyncStorage.setItem(TRACKS_KEY, JSON.stringify(filtered));
+    for (const plId of affectedPlaylists) {
+        const remaining = filtered.filter(t => t.playlistId === plId);
+        await updatePlaylist(plId, {
+            trackCount: remaining.length,
+            totalDuration: remaining.reduce((sum, t) => sum + (t.duration || 0), 0),
+        });
+    }
+}
+
+// ============= FAVORITES (Liked Songs) =============
+
+export async function getFavorites() {
+    try {
+        const data = await AsyncStorage.getItem(FAVORITES_KEY);
+        return data ? JSON.parse(data) : [];
+    } catch { return []; }
+}
+
+export async function isFavorite(trackId) {
+    const favs = await getFavorites();
+    return favs.includes(trackId);
+}
+
+export async function toggleFavorite(trackId) {
+    const favs = await getFavorites();
+    const idx = favs.indexOf(trackId);
+    if (idx >= 0) {
+        favs.splice(idx, 1);
+    } else {
+        favs.unshift(trackId);
+    }
+    await AsyncStorage.setItem(FAVORITES_KEY, JSON.stringify(favs));
+    return idx < 0; // returns true if now favorited
+}
+
+export async function getFavoriteTracks() {
+    const favIds = await getFavorites();
+    if (favIds.length === 0) return [];
+    const allTracks = await getAllTracks();
+    return favIds
+        .map(id => allTracks.find(t => t.id === id))
+        .filter(Boolean);
+}
+
+// ============= RECENTLY PLAYED =============
+
+export async function getRecentlyPlayed() {
+    try {
+        const data = await AsyncStorage.getItem(RECENTLY_PLAYED_KEY);
+        return data ? JSON.parse(data) : [];
+    } catch { return []; }
+}
+
+export async function addRecentlyPlayed(track) {
+    if (!track?.id) return;
+    const recent = await getRecentlyPlayed();
+    // Remove existing entry if present
+    const filtered = recent.filter(r => r.id !== track.id);
+    // Add to front
+    filtered.unshift({
+        id: track.id,
+        title: track.title,
+        artist: track.artist,
+        thumbnail: track.thumbnail,
+        filePath: track.filePath,
+        downloaded: track.downloaded,
+        playlistId: track.playlistId,
+        playedAt: new Date().toISOString(),
+    });
+    // Cap at MAX_RECENT
+    if (filtered.length > MAX_RECENT) filtered.length = MAX_RECENT;
+    await AsyncStorage.setItem(RECENTLY_PLAYED_KEY, JSON.stringify(filtered));
+}
+
+// ============= SEARCH =============
+
+export async function searchTracks(query) {
+    if (!query || query.trim().length === 0) return [];
+    const q = query.toLowerCase().trim();
+    const allTracks = await getAllTracks();
+    return allTracks.filter(t =>
+        (t.title && t.title.toLowerCase().includes(q)) ||
+        (t.artist && t.artist.toLowerCase().includes(q))
+    );
+}
+
+export async function searchPlaylists(query) {
+    if (!query || query.trim().length === 0) return [];
+    const q = query.toLowerCase().trim();
+    const playlists = await getPlaylists();
+    return playlists.filter(p =>
+        p.name && p.name.toLowerCase().includes(q)
+    );
 }

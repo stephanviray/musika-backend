@@ -1,12 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Image, Animated } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Image, Animated, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { isFavorite, toggleFavorite } from '../services/storage';
+import playerService from '../services/player';
 import { COLORS, SIZES, FONTS } from '../constants/theme';
 
-export default function TrackItem({ track, index, onPress, onDelete, isPlaying }) {
+export default function TrackItem({ track, index, onPress, onDelete, onLongPress, isPlaying, selectionMode, isSelected }) {
     const [barAnims] = useState(
         Array.from({ length: 3 }, () => new Animated.Value(0.3))
     );
+    const [liked, setLiked] = useState(false);
+    const [showActions, setShowActions] = useState(false);
+
+    useEffect(() => {
+        if (track?.id) {
+            isFavorite(track.id).then(setLiked);
+        }
+    }, [track?.id]);
 
     useEffect(() => {
         if (isPlaying) {
@@ -40,20 +50,72 @@ export default function TrackItem({ track, index, onPress, onDelete, isPlaying }
         return `${mins}:${secs.toString().padStart(2, '0')}`;
     };
 
+    const handlePress = () => {
+        if (selectionMode) {
+            onLongPress?.();
+        } else {
+            onPress?.();
+        }
+    };
+
+    const handleToggleLike = async () => {
+        const nowLiked = await toggleFavorite(track.id);
+        setLiked(nowLiked);
+    };
+
+    const handleAddToQueue = () => {
+        if (track.downloaded) {
+            playerService.addToQueue(track);
+            Alert.alert('Added to Queue', `"${track.title}" will play next`);
+        }
+    };
+
+    const handleMorePress = () => {
+        // Show action options
+        Alert.alert(
+            track.title,
+            null,
+            [
+                {
+                    text: liked ? 'Remove from Liked' : 'Add to Liked Songs',
+                    onPress: handleToggleLike,
+                },
+                ...(track.downloaded ? [{
+                    text: 'Add to Queue',
+                    onPress: handleAddToQueue,
+                }] : []),
+                ...(onDelete ? [{
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: () => onDelete(),
+                }] : []),
+                { text: 'Cancel', style: 'cancel' },
+            ]
+        );
+    };
+
     return (
         <TouchableOpacity
             style={[
                 styles.container,
                 isPlaying && styles.containerActive,
                 !track.downloaded && styles.containerDisabled,
+                isSelected && styles.containerSelected,
             ]}
-            onPress={onPress}
-            onLongPress={onDelete}
+            onPress={handlePress}
+            onLongPress={onLongPress}
             activeOpacity={track.downloaded ? 0.6 : 1}
+            delayLongPress={300}
         >
-            {/* Index or Playing indicator */}
+            {/* Selection checkbox or Index */}
             <View style={styles.indexContainer}>
-                {isPlaying ? (
+                {selectionMode ? (
+                    <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+                        {isSelected && (
+                            <Ionicons name="checkmark" size={14} color="#fff" />
+                        )}
+                    </View>
+                ) : isPlaying ? (
                     <View style={styles.barsContainer}>
                         {barAnims.map((anim, i) => (
                             <Animated.View
@@ -117,11 +179,11 @@ export default function TrackItem({ track, index, onPress, onDelete, isPlaying }
                 {formatDuration(track.duration)}
             </Text>
 
-            {/* Play Button */}
-            {track.downloaded && !isPlaying && (
-                <View style={styles.playIcon}>
-                    <Ionicons name="play" size={16} color={COLORS.primary} style={{ marginLeft: 1 }} />
-                </View>
+            {/* Actions (hidden in selection mode) */}
+            {!selectionMode && (
+                <TouchableOpacity style={styles.moreBtn} onPress={handleMorePress}>
+                    <Ionicons name="ellipsis-vertical" size={18} color={COLORS.textMuted} />
+                </TouchableOpacity>
             )}
         </TouchableOpacity>
     );
@@ -143,10 +205,26 @@ const styles = StyleSheet.create({
     containerDisabled: {
         opacity: 0.5,
     },
+    containerSelected: {
+        backgroundColor: COLORS.primary + '18',
+    },
     indexContainer: {
         width: 24,
         alignItems: 'center',
         justifyContent: 'center',
+    },
+    checkbox: {
+        width: 22,
+        height: 22,
+        borderRadius: 11,
+        borderWidth: 2,
+        borderColor: COLORS.textMuted,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    checkboxSelected: {
+        backgroundColor: COLORS.primary,
+        borderColor: COLORS.primary,
     },
     indexText: {
         fontSize: SIZES.textSm,
@@ -216,11 +294,9 @@ const styles = StyleSheet.create({
         minWidth: 40,
         textAlign: 'right',
     },
-    playIcon: {
+    moreBtn: {
         width: 32,
         height: 32,
-        borderRadius: 16,
-        backgroundColor: COLORS.primary + '20',
         alignItems: 'center',
         justifyContent: 'center',
     },

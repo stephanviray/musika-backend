@@ -1,22 +1,23 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     View, Text, StyleSheet, ScrollView, TouchableOpacity,
-    Animated, Image, Alert, Dimensions,
+    Animated, Image, Alert, Dimensions, Modal, FlatList, Vibration,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import TrackItem from '../../components/TrackItem';
-import { getPlaylist, getPlaylistTracks, deletePlaylist, deleteTrack, updateTrack } from '../../services/storage';
+import {
+    getPlaylist, getPlaylists, getPlaylistTracks, deletePlaylist,
+    deleteTrack, updateTrack, deleteMultipleTracks, moveTracksToPlaylist,
+} from '../../services/storage';
 import { deleteAudioFile, downloadTrack } from '../../services/downloader';
 import { extractVideoId } from '../../services/youtube';
 import playerService from '../../services/player';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../../constants/theme';
 
 const { width } = Dimensions.get('window');
-
-
 
 export default function PlaylistScreen() {
     const { id } = useLocalSearchParams();
@@ -26,6 +27,12 @@ export default function PlaylistScreen() {
     const [tracks, setTracks] = useState([]);
     const [scrollY] = useState(new Animated.Value(0));
     const [playerState, setPlayerState] = useState(playerService.getState());
+
+    // Multi-select state
+    const [selectionMode, setSelectionMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState(new Set());
+    const [showMoveModal, setShowMoveModal] = useState(false);
+    const [allPlaylists, setAllPlaylists] = useState([]);
 
     const loadData = useCallback(async () => {
         const pl = await getPlaylist(id);
@@ -46,6 +53,92 @@ export default function PlaylistScreen() {
         });
         return unsubscribe;
     }, []);
+
+    // Exit selection mode cleanly
+    const exitSelectionMode = () => {
+        setSelectionMode(false);
+        setSelectedIds(new Set());
+    };
+
+    // Toggle a track's selection
+    const toggleSelect = (trackId) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(trackId)) {
+                next.delete(trackId);
+                if (next.size === 0) setSelectionMode(false);
+            } else {
+                next.add(trackId);
+            }
+            return next;
+        });
+    };
+
+    // Long press on a track — enter selection mode
+    const handleLongPress = (trackId) => {
+        if (!selectionMode) {
+            Vibration.vibrate(30);
+            setSelectionMode(true);
+            setSelectedIds(new Set([trackId]));
+        } else {
+            toggleSelect(trackId);
+        }
+    };
+
+    // Select/Deselect all
+    const handleSelectAll = () => {
+        if (selectedIds.size === tracks.length) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(tracks.map(t => t.id)));
+        }
+    };
+
+    // Delete selected tracks
+    const handleDeleteSelected = () => {
+        const count = selectedIds.size;
+        Alert.alert(
+            'Delete Tracks',
+            `Delete ${count} selected track${count > 1 ? 's' : ''}?`,
+            [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                    text: 'Delete',
+                    style: 'destructive',
+                    onPress: async () => {
+                        // Delete audio files
+                        for (const trackId of selectedIds) {
+                            const track = tracks.find(t => t.id === trackId);
+                            if (track?.filePath) {
+                                await deleteAudioFile(track.filePath);
+                            }
+                        }
+                        await deleteMultipleTracks([...selectedIds]);
+                        exitSelectionMode();
+                        await loadData();
+                    },
+                },
+            ]
+        );
+    };
+
+    // Move selected to another playlist
+    const handleMoveSelected = async () => {
+        const pls = await getPlaylists();
+        setAllPlaylists(pls.filter(p => p.id !== id)); // Exclude current playlist
+        setShowMoveModal(true);
+    };
+
+    const handleMoveToPlaylist = async (targetPlaylist) => {
+        setShowMoveModal(false);
+        try {
+            await moveTracksToPlaylist([...selectedIds], targetPlaylist.id);
+            Alert.alert('Done', `Copied ${selectedIds.size} track${selectedIds.size > 1 ? 's' : ''} to "${targetPlaylist.name}"`);
+            exitSelectionMode();
+        } catch (e) {
+            Alert.alert('Error', e.message);
+        }
+    };
 
     const handlePlayAll = () => {
         const downloadedTracks = tracks.filter(t => t.downloaded);
@@ -71,7 +164,6 @@ export default function PlaylistScreen() {
             return;
         }
 
-        // Track not downloaded — try to re-download
         if (track.sourceUrl) {
             try {
                 const videoId = extractVideoId(track.sourceUrl);
@@ -90,7 +182,6 @@ export default function PlaylistScreen() {
                                         downloaded: true,
                                     });
                                     await loadData();
-                                    // Auto play the newly downloaded track
                                     const updatedTracks = await getPlaylistTracks(id);
                                     const dlTracks = updatedTracks.filter(t => t.downloaded);
                                     const updatedTrack = dlTracks.find(t => t.id === track.id);
@@ -145,7 +236,6 @@ export default function PlaylistScreen() {
                     text: 'Delete',
                     style: 'destructive',
                     onPress: async () => {
-                        // Delete all audio files
                         for (const track of tracks) {
                             if (track.filePath) {
                                 await deleteAudioFile(track.filePath);
@@ -176,7 +266,6 @@ export default function PlaylistScreen() {
 
     const downloadedCount = tracks.filter(t => t.downloaded).length;
 
-    // Header image opacity based on scroll
     const headerOpacity = scrollY.interpolate({
         inputRange: [0, 150],
         outputRange: [1, 0],
@@ -210,15 +299,33 @@ export default function PlaylistScreen() {
 
     return (
         <View style={[styles.container, { paddingTop: insets.top }]}>
-            {/* Back Button (floating) */}
-            <View style={styles.floatingHeader}>
-                <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-                    <Ionicons name="chevron-back" size={24} color={COLORS.textPrimary} />
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.menuBtn} onPress={handleDeletePlaylist}>
-                    <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
-                </TouchableOpacity>
-            </View>
+            {/* Header — changes based on selection mode */}
+            {selectionMode ? (
+                <View style={styles.selectionHeader}>
+                    <TouchableOpacity style={styles.selHeaderBtn} onPress={exitSelectionMode}>
+                        <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                    </TouchableOpacity>
+                    <Text style={styles.selHeaderTitle}>
+                        {selectedIds.size} selected
+                    </Text>
+                    <TouchableOpacity style={styles.selHeaderBtn} onPress={handleSelectAll}>
+                        <Ionicons
+                            name={selectedIds.size === tracks.length ? 'checkbox' : 'checkbox-outline'}
+                            size={22}
+                            color={COLORS.primary}
+                        />
+                    </TouchableOpacity>
+                </View>
+            ) : (
+                <View style={styles.floatingHeader}>
+                    <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+                        <Ionicons name="chevron-back" size={24} color={COLORS.textPrimary} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.menuBtn} onPress={handleDeletePlaylist}>
+                        <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
+                    </TouchableOpacity>
+                </View>
+            )}
 
             <Animated.ScrollView
                 style={styles.scrollView}
@@ -231,99 +338,101 @@ export default function PlaylistScreen() {
                 scrollEventThrottle={16}
             >
                 {/* Playlist Header */}
-                <Animated.View
-                    style={[
-                        styles.playlistHeader,
-                        { opacity: headerOpacity, transform: [{ scale: headerScale }] },
-                    ]}
-                >
-                    <LinearGradient
-                        colors={[sourceColor + '40', COLORS.background]}
-                        style={styles.headerGradient}
+                {!selectionMode && (
+                    <Animated.View
+                        style={[
+                            styles.playlistHeader,
+                            { opacity: headerOpacity, transform: [{ scale: headerScale }] },
+                        ]}
                     >
-                        {/* Cover Art */}
-                        <View style={styles.coverContainer}>
-                            {playlist.coverArt || (tracks[0] && tracks[0].thumbnail) ? (
-                                <Image
-                                    source={{ uri: playlist.coverArt || tracks[0]?.thumbnail }}
-                                    style={styles.coverImage}
-                                />
-                            ) : (
-                                <LinearGradient
-                                    colors={[sourceColor + '60', sourceColor + '20']}
-                                    style={styles.coverPlaceholder}
-                                >
-                                    <Ionicons name="musical-notes" size={64} color={sourceColor} />
-                                </LinearGradient>
-                            )}
-                            <LinearGradient
-                                colors={['transparent', COLORS.background + '80']}
-                                style={styles.coverOverlay}
-                            />
-                        </View>
-
-                        {/* Playlist Info */}
-                        <Text style={styles.playlistName} numberOfLines={2}>
-                            {playlist.name}
-                        </Text>
-                        <View style={styles.metaRow}>
-                            <Ionicons name={sourceIcon} size={14} color={sourceColor} />
-                            <Text style={styles.metaText}>
-                                {downloadedCount}/{tracks.length} tracks • {formatTotalDuration(playlist.totalDuration)}
-                            </Text>
-                        </View>
-                    </LinearGradient>
-                </Animated.View>
-
-                {/* Playback Controls */}
-                <View style={styles.controls}>
-                    <TouchableOpacity style={styles.shuffleBtn} onPress={handleShuffle}>
-                        <Ionicons name="shuffle" size={20} color={playerState.isShuffled ? COLORS.primary : COLORS.textSecondary} />
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                        style={styles.controlBtn}
-                        onPress={() => playerService.previous()}
-                    >
-                        <Ionicons name="play-skip-back" size={26} color={COLORS.textPrimary} />
-                    </TouchableOpacity>
-
-                    <TouchableOpacity style={styles.playAllBtn} onPress={() => {
-                        if (playerState.isPlaying && playerState.currentTrack) {
-                            playerService.togglePlay();
-                        } else if (playerState.currentTrack && !playerState.isPlaying) {
-                            playerService.play();
-                        } else {
-                            handlePlayAll();
-                        }
-                    }} activeOpacity={0.8}>
                         <LinearGradient
-                            colors={[COLORS.primary, COLORS.primaryDark]}
-                            style={styles.playAllGradient}
+                            colors={[sourceColor + '40', COLORS.background]}
+                            style={styles.headerGradient}
                         >
-                            <Ionicons
-                                name={playerState.isPlaying ? 'pause' : 'play'}
-                                size={30}
-                                color="#fff"
-                                style={!playerState.isPlaying ? { marginLeft: 3 } : undefined}
-                            />
+                            <View style={styles.coverContainer}>
+                                {playlist.coverArt || (tracks[0] && tracks[0].thumbnail) ? (
+                                    <Image
+                                        source={{ uri: playlist.coverArt || tracks[0]?.thumbnail }}
+                                        style={styles.coverImage}
+                                    />
+                                ) : (
+                                    <LinearGradient
+                                        colors={[sourceColor + '60', sourceColor + '20']}
+                                        style={styles.coverPlaceholder}
+                                    >
+                                        <Ionicons name="musical-notes" size={64} color={sourceColor} />
+                                    </LinearGradient>
+                                )}
+                                <LinearGradient
+                                    colors={['transparent', COLORS.background + '80']}
+                                    style={styles.coverOverlay}
+                                />
+                            </View>
+
+                            <Text style={styles.playlistName} numberOfLines={2}>
+                                {playlist.name}
+                            </Text>
+                            <View style={styles.metaRow}>
+                                <Ionicons name={sourceIcon} size={14} color={sourceColor} />
+                                <Text style={styles.metaText}>
+                                    {downloadedCount}/{tracks.length} tracks • {formatTotalDuration(playlist.totalDuration)}
+                                </Text>
+                            </View>
                         </LinearGradient>
-                    </TouchableOpacity>
+                    </Animated.View>
+                )}
 
-                    <TouchableOpacity
-                        style={styles.controlBtn}
-                        onPress={() => playerService.next()}
-                    >
-                        <Ionicons name="play-skip-forward" size={26} color={COLORS.textPrimary} />
-                    </TouchableOpacity>
+                {/* Playback Controls (hidden in selection mode) */}
+                {!selectionMode && (
+                    <View style={styles.controls}>
+                        <TouchableOpacity style={styles.shuffleBtn} onPress={handleShuffle}>
+                            <Ionicons name="shuffle" size={20} color={playerState.isShuffled ? COLORS.primary : COLORS.textSecondary} />
+                        </TouchableOpacity>
 
-                    <TouchableOpacity
-                        style={styles.shuffleBtn}
-                        onPress={() => playerService.toggleLoop()}
-                    >
-                        <Ionicons name="repeat" size={20} color={playerState.isLooping ? COLORS.primary : COLORS.textSecondary} />
-                    </TouchableOpacity>
-                </View>
+                        <TouchableOpacity
+                            style={styles.controlBtn}
+                            onPress={() => playerService.previous()}
+                        >
+                            <Ionicons name="play-skip-back" size={26} color={COLORS.textPrimary} />
+                        </TouchableOpacity>
+
+                        <TouchableOpacity style={styles.playAllBtn} onPress={() => {
+                            if (playerState.isPlaying && playerState.currentTrack) {
+                                playerService.togglePlay();
+                            } else if (playerState.currentTrack && !playerState.isPlaying) {
+                                playerService.play();
+                            } else {
+                                handlePlayAll();
+                            }
+                        }} activeOpacity={0.8}>
+                            <LinearGradient
+                                colors={[COLORS.primary, COLORS.primaryDark]}
+                                style={styles.playAllGradient}
+                            >
+                                <Ionicons
+                                    name={playerState.isPlaying ? 'pause' : 'play'}
+                                    size={30}
+                                    color="#fff"
+                                    style={!playerState.isPlaying ? { marginLeft: 3 } : undefined}
+                                />
+                            </LinearGradient>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={styles.controlBtn}
+                            onPress={() => playerService.next()}
+                        >
+                            <Ionicons name="play-skip-forward" size={26} color={COLORS.textPrimary} />
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={styles.shuffleBtn}
+                            onPress={() => playerService.toggleLoop()}
+                        >
+                            <Ionicons name="repeat" size={20} color={playerState.isLooping ? COLORS.primary : COLORS.textSecondary} />
+                        </TouchableOpacity>
+                    </View>
+                )}
 
                 {/* Track List */}
                 <View style={styles.trackList}>
@@ -339,17 +448,80 @@ export default function PlaylistScreen() {
                                 index={index}
                                 onPress={() => handlePlayTrack(track, index)}
                                 onDelete={() => handleDeleteTrack(track)}
+                                onLongPress={() => handleLongPress(track.id)}
                                 isPlaying={
                                     playerState.currentTrack?.id === track.id && playerState.isPlaying
                                 }
+                                selectionMode={selectionMode}
+                                isSelected={selectedIds.has(track.id)}
                             />
                         ))
                     )}
                 </View>
 
-                {/* Bottom spacing */}
                 <View style={{ height: 140 }} />
             </Animated.ScrollView>
+
+            {/* Selection Action Bar */}
+            {selectionMode && selectedIds.size > 0 && (
+                <View style={[styles.actionBar, { paddingBottom: insets.bottom + 12 }]}>
+                    <TouchableOpacity style={styles.actionBtn} onPress={handleMoveSelected}>
+                        <Ionicons name="folder-open-outline" size={22} color={COLORS.primary} />
+                        <Text style={styles.actionText}>Copy to</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.actionBtn} onPress={handleDeleteSelected}>
+                        <Ionicons name="trash-outline" size={22} color={COLORS.danger} />
+                        <Text style={[styles.actionText, { color: COLORS.danger }]}>Delete</Text>
+                    </TouchableOpacity>
+                </View>
+            )}
+
+            {/* Move to Playlist Modal */}
+            <Modal visible={showMoveModal} transparent animationType="slide">
+                <View style={styles.modalOverlay}>
+                    <View style={[styles.modalContent, { paddingBottom: insets.bottom + 16 }]}>
+                        <View style={styles.modalHeader}>
+                            <Text style={styles.modalTitle}>Copy to Playlist</Text>
+                            <TouchableOpacity onPress={() => setShowMoveModal(false)}>
+                                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                            </TouchableOpacity>
+                        </View>
+
+                        {allPlaylists.length === 0 ? (
+                            <View style={styles.modalEmpty}>
+                                <Ionicons name="albums-outline" size={48} color={COLORS.textMuted} />
+                                <Text style={styles.modalEmptyText}>No other playlists</Text>
+                            </View>
+                        ) : (
+                            <FlatList
+                                data={allPlaylists}
+                                keyExtractor={(item) => item.id}
+                                renderItem={({ item }) => (
+                                    <TouchableOpacity
+                                        style={styles.playlistItem}
+                                        onPress={() => handleMoveToPlaylist(item)}
+                                    >
+                                        <View style={styles.playlistItemIcon}>
+                                            <Ionicons name="musical-notes" size={20} color={COLORS.primary} />
+                                        </View>
+                                        <View style={styles.playlistItemInfo}>
+                                            <Text style={styles.playlistItemName} numberOfLines={1}>
+                                                {item.name}
+                                            </Text>
+                                            <Text style={styles.playlistItemMeta}>
+                                                {item.trackCount || 0} tracks
+                                            </Text>
+                                        </View>
+                                        <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                                    </TouchableOpacity>
+                                )}
+                                style={styles.playlistList}
+                            />
+                        )}
+                    </View>
+                </View>
+            </Modal>
         </View>
     );
 }
@@ -369,6 +541,31 @@ const styles = StyleSheet.create({
         color: COLORS.textMuted,
         marginTop: SIZES.md,
     },
+    // Selection mode header
+    selectionHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: SIZES.base,
+        paddingVertical: SIZES.sm,
+        backgroundColor: COLORS.surface,
+        borderBottomWidth: 1,
+        borderBottomColor: COLORS.surfaceLight,
+        zIndex: 10,
+    },
+    selHeaderBtn: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    selHeaderTitle: {
+        fontSize: SIZES.textLg,
+        color: COLORS.textPrimary,
+        ...FONTS.semiBold,
+    },
+    // Normal header
     floatingHeader: {
         position: 'absolute',
         top: 50,
@@ -502,5 +699,96 @@ const styles = StyleSheet.create({
     emptyText: {
         fontSize: SIZES.textBase,
         color: COLORS.textMuted,
+    },
+    // Action Bar (bottom)
+    actionBar: {
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        flexDirection: 'row',
+        justifyContent: 'space-evenly',
+        alignItems: 'center',
+        backgroundColor: COLORS.surface,
+        borderTopWidth: 1,
+        borderTopColor: COLORS.surfaceLight,
+        paddingTop: 12,
+    },
+    actionBtn: {
+        alignItems: 'center',
+        gap: 4,
+        paddingHorizontal: 20,
+        paddingVertical: 6,
+    },
+    actionText: {
+        fontSize: SIZES.textXs,
+        color: COLORS.primary,
+        ...FONTS.medium,
+    },
+    // Modal
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.6)',
+        justifyContent: 'flex-end',
+    },
+    modalContent: {
+        backgroundColor: COLORS.surface,
+        borderTopLeftRadius: 20,
+        borderTopRightRadius: 20,
+        maxHeight: '60%',
+    },
+    modalHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: SIZES.base,
+        borderBottomWidth: 1,
+        borderBottomColor: COLORS.surfaceLight,
+    },
+    modalTitle: {
+        fontSize: SIZES.textLg,
+        color: COLORS.textPrimary,
+        ...FONTS.semiBold,
+    },
+    modalEmpty: {
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: SIZES.xxxl,
+    },
+    modalEmptyText: {
+        fontSize: SIZES.textBase,
+        color: COLORS.textMuted,
+        marginTop: SIZES.md,
+    },
+    playlistList: {
+        padding: SIZES.sm,
+    },
+    playlistItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        padding: SIZES.md,
+        gap: SIZES.md,
+        borderRadius: SIZES.radiusSm,
+    },
+    playlistItemIcon: {
+        width: 44,
+        height: 44,
+        borderRadius: SIZES.radiusSm,
+        backgroundColor: COLORS.primary + '15',
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    playlistItemInfo: {
+        flex: 1,
+    },
+    playlistItemName: {
+        fontSize: SIZES.textBase,
+        color: COLORS.textPrimary,
+        ...FONTS.medium,
+    },
+    playlistItemMeta: {
+        fontSize: SIZES.textSm,
+        color: COLORS.textSecondary,
+        marginTop: 2,
     },
 });

@@ -1,16 +1,28 @@
 import React, { useState, useEffect } from 'react';
 import {
     View, Text, StyleSheet, TouchableOpacity,
-    Image, Animated, Dimensions,
+    Image, Animated, Dimensions, Modal, Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import playerService from '../services/player';
+import { isFavorite, toggleFavorite } from '../services/storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../constants/theme';
 
 const { width, height } = Dimensions.get('window');
+
+const SLEEP_OPTIONS = [
+    { label: '5 min', value: 5 },
+    { label: '15 min', value: 15 },
+    { label: '30 min', value: 30 },
+    { label: '45 min', value: 45 },
+    { label: '1 hour', value: 60 },
+    { label: '2 hours', value: 120 },
+];
+
+const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
 export default function PlayerScreen() {
     const insets = useSafeAreaInsets();
@@ -18,12 +30,32 @@ export default function PlayerScreen() {
     const [playerState, setPlayerState] = useState(playerService.getState());
     const [spinAnim] = useState(new Animated.Value(0));
     const [pulseAnim] = useState(new Animated.Value(1));
+    const [isLiked, setIsLiked] = useState(false);
+    const [showSleepTimer, setShowSleepTimer] = useState(false);
+    const [showSpeedPicker, setShowSpeedPicker] = useState(false);
+    const [sleepRemaining, setSleepRemaining] = useState(null);
 
     useEffect(() => {
         const unsubscribe = playerService.subscribe((state) => {
             setPlayerState(state);
         });
         return unsubscribe;
+    }, []);
+
+    // Check if current track is liked
+    useEffect(() => {
+        if (playerState.currentTrack?.id) {
+            isFavorite(playerState.currentTrack.id).then(setIsLiked);
+        }
+    }, [playerState.currentTrack?.id]);
+
+    // Sleep timer countdown
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const remaining = playerService.getSleepTimerRemaining();
+            setSleepRemaining(remaining);
+        }, 10000);
+        return () => clearInterval(interval);
     }, []);
 
     // Vinyl spin animation
@@ -38,7 +70,6 @@ export default function PlayerScreen() {
             );
             spin.start();
 
-            // Pulse animation for the play button glow
             const pulse = Animated.loop(
                 Animated.sequence([
                     Animated.timing(pulseAnim, {
@@ -73,6 +104,29 @@ export default function PlayerScreen() {
         const mins = Math.floor(totalSecs / 60);
         const secs = totalSecs % 60;
         return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    const handleToggleLike = async () => {
+        if (!playerState.currentTrack?.id) return;
+        const nowLiked = await toggleFavorite(playerState.currentTrack.id);
+        setIsLiked(nowLiked);
+    };
+
+    const handleSetSleepTimer = (minutes) => {
+        playerService.setSleepTimer(minutes);
+        setSleepRemaining(minutes);
+        setShowSleepTimer(false);
+    };
+
+    const handleCancelSleepTimer = () => {
+        playerService.cancelSleepTimer();
+        setSleepRemaining(null);
+        setShowSleepTimer(false);
+    };
+
+    const handleSetSpeed = async (speed) => {
+        await playerService.setPlaybackSpeed(speed);
+        setShowSpeedPicker(false);
     };
 
     const progress = playerState.duration > 0
@@ -115,7 +169,9 @@ export default function PlayerScreen() {
                     <Ionicons name="chevron-down" size={28} color={COLORS.textPrimary} />
                 </TouchableOpacity>
                 <Text style={styles.headerTitle}>Now Playing</Text>
-                <View style={{ width: 40 }} />
+                <TouchableOpacity style={styles.queueBtn} onPress={() => router.push('/queue')}>
+                    <Ionicons name="list" size={22} color={COLORS.textPrimary} />
+                </TouchableOpacity>
             </View>
 
             <View style={styles.content}>
@@ -156,14 +212,23 @@ export default function PlayerScreen() {
                     )}
                 </View>
 
-                {/* Track Info */}
-                <View style={styles.trackInfo}>
-                    <Text style={styles.trackTitle} numberOfLines={2}>
-                        {track.title}
-                    </Text>
-                    <Text style={styles.trackArtist} numberOfLines={1}>
-                        {track.artist}
-                    </Text>
+                {/* Track Info + Like Button */}
+                <View style={styles.trackInfoRow}>
+                    <View style={styles.trackInfo}>
+                        <Text style={styles.trackTitle} numberOfLines={2}>
+                            {track.title}
+                        </Text>
+                        <Text style={styles.trackArtist} numberOfLines={1}>
+                            {track.artist}
+                        </Text>
+                    </View>
+                    <TouchableOpacity style={styles.likeBtn} onPress={handleToggleLike}>
+                        <Ionicons
+                            name={isLiked ? 'heart' : 'heart-outline'}
+                            size={26}
+                            color={isLiked ? COLORS.primary : COLORS.textSecondary}
+                        />
+                    </TouchableOpacity>
                 </View>
 
                 {/* Progress Bar */}
@@ -256,6 +321,47 @@ export default function PlayerScreen() {
                     </TouchableOpacity>
                 </View>
 
+                {/* Bottom Actions Row */}
+                <View style={styles.bottomActions}>
+                    <TouchableOpacity
+                        style={styles.bottomActionBtn}
+                        onPress={() => setShowSpeedPicker(true)}
+                    >
+                        <Text style={[
+                            styles.speedLabel,
+                            playerState.playbackSpeed !== 1.0 && { color: COLORS.primary },
+                        ]}>
+                            {playerState.playbackSpeed}x
+                        </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={styles.bottomActionBtn}
+                        onPress={() => setShowSleepTimer(true)}
+                    >
+                        <Ionicons
+                            name="moon-outline"
+                            size={20}
+                            color={sleepRemaining ? COLORS.primary : COLORS.textSecondary}
+                        />
+                        {sleepRemaining && (
+                            <Text style={styles.sleepBadge}>{sleepRemaining}m</Text>
+                        )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        style={styles.bottomActionBtn}
+                        onPress={() => {
+                            if (track.downloaded) {
+                                playerService.addToQueue(track);
+                                Alert.alert('Added to Queue', `"${track.title}" added to your queue`);
+                            }
+                        }}
+                    >
+                        <Ionicons name="add-circle-outline" size={22} color={COLORS.textSecondary} />
+                    </TouchableOpacity>
+                </View>
+
                 {/* Waveform visualization */}
                 {playerState.isPlaying && (
                     <View style={styles.waveform}>
@@ -265,6 +371,77 @@ export default function PlayerScreen() {
                     </View>
                 )}
             </View>
+
+            {/* Sleep Timer Modal */}
+            <Modal visible={showSleepTimer} transparent animationType="slide">
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <View style={styles.modalHeader}>
+                            <Ionicons name="moon" size={22} color={COLORS.primary} />
+                            <Text style={styles.modalTitle}>Sleep Timer</Text>
+                            <TouchableOpacity onPress={() => setShowSleepTimer(false)}>
+                                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                            </TouchableOpacity>
+                        </View>
+                        {sleepRemaining && (
+                            <TouchableOpacity
+                                style={styles.cancelTimerBtn}
+                                onPress={handleCancelSleepTimer}
+                            >
+                                <Ionicons name="close-circle" size={18} color={COLORS.danger} />
+                                <Text style={styles.cancelTimerText}>
+                                    Cancel timer ({sleepRemaining} min remaining)
+                                </Text>
+                            </TouchableOpacity>
+                        )}
+                        {SLEEP_OPTIONS.map((opt) => (
+                            <TouchableOpacity
+                                key={opt.value}
+                                style={styles.timerOption}
+                                onPress={() => handleSetSleepTimer(opt.value)}
+                            >
+                                <Text style={styles.timerOptionText}>{opt.label}</Text>
+                                <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+                </View>
+            </Modal>
+
+            {/* Speed Picker Modal */}
+            <Modal visible={showSpeedPicker} transparent animationType="slide">
+                <View style={styles.modalOverlay}>
+                    <View style={styles.modalContent}>
+                        <View style={styles.modalHeader}>
+                            <Ionicons name="speedometer-outline" size={22} color={COLORS.primary} />
+                            <Text style={styles.modalTitle}>Playback Speed</Text>
+                            <TouchableOpacity onPress={() => setShowSpeedPicker(false)}>
+                                <Ionicons name="close" size={24} color={COLORS.textPrimary} />
+                            </TouchableOpacity>
+                        </View>
+                        {SPEED_OPTIONS.map((speed) => (
+                            <TouchableOpacity
+                                key={speed}
+                                style={[
+                                    styles.timerOption,
+                                    playerState.playbackSpeed === speed && styles.timerOptionActive,
+                                ]}
+                                onPress={() => handleSetSpeed(speed)}
+                            >
+                                <Text style={[
+                                    styles.timerOptionText,
+                                    playerState.playbackSpeed === speed && { color: COLORS.primary },
+                                ]}>
+                                    {speed}x {speed === 1.0 ? '(Normal)' : ''}
+                                </Text>
+                                {playerState.playbackSpeed === speed && (
+                                    <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
+                                )}
+                            </TouchableOpacity>
+                        ))}
+                    </View>
+                </View>
+            </Modal>
         </View>
     );
 }
@@ -348,6 +525,12 @@ const styles = StyleSheet.create({
         textTransform: 'uppercase',
         letterSpacing: 1.5,
     },
+    queueBtn: {
+        width: 40,
+        height: 40,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     content: {
         flex: 1,
         alignItems: 'center',
@@ -404,16 +587,20 @@ const styles = StyleSheet.create({
         opacity: 0.1,
         zIndex: -1,
     },
-    trackInfo: {
+    trackInfoRow: {
+        flexDirection: 'row',
         alignItems: 'center',
+        width: '100%',
         marginBottom: SIZES.xxl,
-        paddingHorizontal: SIZES.lg,
+        paddingHorizontal: SIZES.sm,
+    },
+    trackInfo: {
+        flex: 1,
     },
     trackTitle: {
         fontSize: SIZES.text2xl,
         color: COLORS.textPrimary,
         ...FONTS.bold,
-        textAlign: 'center',
     },
     trackArtist: {
         fontSize: SIZES.textLg,
@@ -421,9 +608,15 @@ const styles = StyleSheet.create({
         ...FONTS.medium,
         marginTop: SIZES.xs,
     },
+    likeBtn: {
+        width: 48,
+        height: 48,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
     progressContainer: {
         width: '100%',
-        marginBottom: SIZES.xxl,
+        marginBottom: SIZES.xl,
     },
     progressBar: {
         width: '100%',
@@ -464,7 +657,7 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         gap: SIZES.lg,
-        marginBottom: SIZES.xl,
+        marginBottom: SIZES.lg,
     },
     secondaryBtn: {
         width: 44,
@@ -490,6 +683,32 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
     },
+    // Bottom action row
+    bottomActions: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: SIZES.xxl,
+        marginBottom: SIZES.md,
+    },
+    bottomActionBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        paddingHorizontal: SIZES.sm,
+        paddingVertical: SIZES.xs,
+    },
+    speedLabel: {
+        fontSize: SIZES.textSm,
+        color: COLORS.textSecondary,
+        ...FONTS.bold,
+    },
+    sleepBadge: {
+        fontSize: SIZES.textXs,
+        color: COLORS.primary,
+        ...FONTS.bold,
+    },
+    // Waveform
     waveform: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -503,5 +722,65 @@ const styles = StyleSheet.create({
         borderRadius: 2,
         backgroundColor: COLORS.primary,
         opacity: 0.6,
+    },
+    // Modals
+    modalOverlay: {
+        flex: 1,
+        backgroundColor: 'rgba(0,0,0,0.6)',
+        justifyContent: 'flex-end',
+    },
+    modalContent: {
+        backgroundColor: COLORS.surface,
+        borderTopLeftRadius: 20,
+        borderTopRightRadius: 20,
+        paddingBottom: 40,
+    },
+    modalHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        padding: SIZES.base,
+        borderBottomWidth: 1,
+        borderBottomColor: COLORS.surfaceLight,
+        gap: SIZES.sm,
+    },
+    modalTitle: {
+        flex: 1,
+        fontSize: SIZES.textLg,
+        color: COLORS.textPrimary,
+        ...FONTS.bold,
+    },
+    cancelTimerBtn: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: SIZES.sm,
+        margin: SIZES.base,
+        padding: SIZES.md,
+        backgroundColor: COLORS.danger + '10',
+        borderRadius: SIZES.radiusSm,
+        borderWidth: 1,
+        borderColor: COLORS.danger + '30',
+    },
+    cancelTimerText: {
+        fontSize: SIZES.textSm,
+        color: COLORS.danger,
+        ...FONTS.medium,
+    },
+    timerOption: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingVertical: SIZES.base,
+        paddingHorizontal: SIZES.lg,
+        borderBottomWidth: 1,
+        borderBottomColor: COLORS.surfaceLight,
+    },
+    timerOptionActive: {
+        backgroundColor: COLORS.primary + '10',
+    },
+    timerOptionText: {
+        fontSize: SIZES.textBase,
+        color: COLORS.textPrimary,
+        ...FONTS.medium,
     },
 });

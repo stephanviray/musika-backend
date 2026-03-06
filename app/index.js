@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
     View, Text, StyleSheet, ScrollView, TouchableOpacity,
-    RefreshControl, Animated, Dimensions,
+    RefreshControl, Animated, Dimensions, Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -9,10 +9,18 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
 import PlaylistCard from '../components/PlaylistCard';
 import ImportModal from '../components/ImportModal';
-import { getPlaylists, getStats, createPlaylist } from '../services/storage';
-import { COLORS, SIZES, FONTS } from '../constants/theme';
+import { getPlaylists, getStats, createPlaylist, getRecentlyPlayed, getFavoriteTracks } from '../services/storage';
+import playerService from '../services/player';
+import { COLORS, SIZES, FONTS, SHADOWS } from '../constants/theme';
 
 const { width } = Dimensions.get('window');
+
+function getGreeting() {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 18) return 'Good afternoon';
+    return 'Good evening';
+}
 
 export default function LibraryScreen() {
     const insets = useSafeAreaInsets();
@@ -23,16 +31,24 @@ export default function LibraryScreen() {
     const [showImport, setShowImport] = useState(false);
     const [fadeAnim] = useState(new Animated.Value(0));
     const [slideAnim] = useState(new Animated.Value(30));
+    const [recentlyPlayed, setRecentlyPlayed] = useState([]);
+    const [likedCount, setLikedCount] = useState(0);
 
     const loadData = useCallback(async () => {
-        const [pl, st] = await Promise.all([getPlaylists(), getStats()]);
+        const [pl, st, recent, liked] = await Promise.all([
+            getPlaylists(),
+            getStats(),
+            getRecentlyPlayed(),
+            getFavoriteTracks(),
+        ]);
         setPlaylists(pl);
         setStats(st);
+        setRecentlyPlayed(recent.slice(0, 8));
+        setLikedCount(liked.length);
     }, []);
 
     useEffect(() => {
         loadData();
-        // Entrance animation
         Animated.parallel([
             Animated.timing(fadeAnim, {
                 toValue: 1,
@@ -47,7 +63,6 @@ export default function LibraryScreen() {
         ]).start();
     }, []);
 
-    // Refresh when returning to this screen
     useEffect(() => {
         const interval = setInterval(loadData, 2000);
         return () => clearInterval(interval);
@@ -65,6 +80,12 @@ export default function LibraryScreen() {
         router.push(`/playlist/${playlist.id}`);
     };
 
+    const handlePlayRecent = (track) => {
+        if (track.downloaded && track.filePath) {
+            playerService.playTrack(track, [track], 0);
+        }
+    };
+
     const formatDuration = (seconds) => {
         if (!seconds) return '0 min';
         const hrs = Math.floor(seconds / 3600);
@@ -73,32 +94,132 @@ export default function LibraryScreen() {
         return `${mins} min`;
     };
 
-    const formatSize = (bytes) => {
-        if (!bytes) return '0 MB';
-        const mb = bytes / (1024 * 1024);
-        if (mb > 1024) return `${(mb / 1024).toFixed(1)} GB`;
-        return `${mb.toFixed(0)} MB`;
-    };
-
     return (
         <View style={[styles.container, { paddingTop: insets.top }]}>
             {/* Header */}
             <LinearGradient
-                colors={[COLORS.primary + '30', COLORS.background]}
+                colors={[COLORS.primary + '20', COLORS.background]}
                 style={styles.headerGradient}
             >
                 <View style={styles.header}>
                     <View>
-                        <Text style={styles.greeting}>Your Music</Text>
+                        <Text style={styles.greeting}>{getGreeting()}</Text>
                         <Text style={styles.title}>Musika</Text>
                     </View>
-                    <TouchableOpacity
-                        style={styles.settingsBtn}
-                        onPress={handleCreatePlaylist}
-                    >
-                        <Ionicons name="add-circle" size={28} color={COLORS.primary} />
-                    </TouchableOpacity>
+                    <View style={styles.headerActions}>
+                        <TouchableOpacity
+                            style={styles.headerActionBtn}
+                            onPress={handleCreatePlaylist}
+                        >
+                            <Ionicons name="add-circle" size={26} color={COLORS.primary} />
+                        </TouchableOpacity>
+                    </View>
                 </View>
+            </LinearGradient>
+
+            <ScrollView
+                style={styles.content}
+                contentContainerStyle={styles.contentContainer}
+                refreshControl={
+                    <RefreshControl
+                        refreshing={refreshing}
+                        onRefresh={onRefresh}
+                        tintColor={COLORS.primary}
+                        colors={[COLORS.primary]}
+                    />
+                }
+                showsVerticalScrollIndicator={false}
+            >
+                {/* Quick Access Grid - Spotify-style chips */}
+                <Animated.View
+                    style={[
+                        styles.quickAccess,
+                        { opacity: fadeAnim, transform: [{ translateY: slideAnim }] },
+                    ]}
+                >
+                    {/* Liked Songs chip */}
+                    <TouchableOpacity
+                        style={styles.quickChip}
+                        onPress={() => router.push('/liked')}
+                        activeOpacity={0.7}
+                    >
+                        <LinearGradient
+                            colors={['#8B5CF6', '#3B82F6']}
+                            style={styles.chipIcon}
+                        >
+                            <Ionicons name="heart" size={14} color="#fff" />
+                        </LinearGradient>
+                        <Text style={styles.chipText} numberOfLines={1}>Liked Songs</Text>
+                    </TouchableOpacity>
+
+                    {/* Recently Played chip - to queue */}
+                    <TouchableOpacity
+                        style={styles.quickChip}
+                        onPress={() => router.push('/queue')}
+                        activeOpacity={0.7}
+                    >
+                        <View style={[styles.chipIcon, { backgroundColor: COLORS.primary + '30' }]}>
+                            <Ionicons name="list" size={14} color={COLORS.primary} />
+                        </View>
+                        <Text style={styles.chipText} numberOfLines={1}>Queue</Text>
+                    </TouchableOpacity>
+
+                    {/* Show first 4 playlists as quick chips */}
+                    {playlists.slice(0, 4).map((pl) => (
+                        <TouchableOpacity
+                            key={pl.id}
+                            style={styles.quickChip}
+                            onPress={() => router.push(`/playlist/${pl.id}`)}
+                            activeOpacity={0.7}
+                        >
+                            {pl.coverArt ? (
+                                <Image source={{ uri: pl.coverArt }} style={styles.chipCover} />
+                            ) : (
+                                <View style={[styles.chipIcon, { backgroundColor: COLORS.surfaceHighlight }]}>
+                                    <Ionicons name="musical-notes" size={14} color={COLORS.textSecondary} />
+                                </View>
+                            )}
+                            <Text style={styles.chipText} numberOfLines={1}>{pl.name}</Text>
+                        </TouchableOpacity>
+                    ))}
+                </Animated.View>
+
+                {/* Recently Played */}
+                {recentlyPlayed.length > 0 && (
+                    <Animated.View
+                        style={[styles.section, { opacity: fadeAnim }]}
+                    >
+                        <Text style={styles.sectionTitle}>Recently Played</Text>
+                        <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            style={styles.recentScroll}
+                            contentContainerStyle={{ paddingHorizontal: SIZES.lg }}
+                        >
+                            {recentlyPlayed.map((track, i) => (
+                                <TouchableOpacity
+                                    key={`${track.id}-${i}`}
+                                    style={styles.recentCard}
+                                    onPress={() => handlePlayRecent(track)}
+                                    activeOpacity={0.7}
+                                >
+                                    {track.thumbnail ? (
+                                        <Image source={{ uri: track.thumbnail }} style={styles.recentThumb} />
+                                    ) : (
+                                        <LinearGradient
+                                            colors={[COLORS.primary + '40', COLORS.surfaceLight]}
+                                            style={[styles.recentThumb, { alignItems: 'center', justifyContent: 'center' }]}
+                                        >
+                                            <Ionicons name="musical-note" size={28} color={COLORS.primary} />
+                                        </LinearGradient>
+                                    )}
+                                    <Text style={styles.recentTitle} numberOfLines={2}>{track.title}</Text>
+                                    <Text style={styles.recentArtist} numberOfLines={1}>{track.artist}</Text>
+                                </TouchableOpacity>
+                            ))}
+                        </ScrollView>
+                    </Animated.View>
+                )}
 
                 {/* Stats Cards */}
                 {stats && (
@@ -140,23 +261,9 @@ export default function LibraryScreen() {
                         </View>
                     </Animated.View>
                 )}
-            </LinearGradient>
 
-            {/* Playlists */}
-            <ScrollView
-                style={styles.content}
-                contentContainerStyle={styles.contentContainer}
-                refreshControl={
-                    <RefreshControl
-                        refreshing={refreshing}
-                        onRefresh={onRefresh}
-                        tintColor={COLORS.primary}
-                        colors={[COLORS.primary]}
-                    />
-                }
-                showsVerticalScrollIndicator={false}
-            >
-                <Text style={styles.sectionTitle}>Your Playlists</Text>
+                {/* Your Playlists */}
+                <Text style={styles.sectionTitle2}>Your Playlists</Text>
 
                 {playlists.length === 0 ? (
                     <Animated.View
@@ -204,8 +311,8 @@ export default function LibraryScreen() {
                     </Animated.View>
                 )}
 
-                {/* Bottom spacing for mini player */}
-                <View style={{ height: 140 }} />
+                {/* Bottom spacing for mini player + tab bar */}
+                <View style={{ height: 180 }} />
             </ScrollView>
 
             {/* FAB - Import Button */}
@@ -239,13 +346,25 @@ const styles = StyleSheet.create({
     },
     headerGradient: {
         paddingHorizontal: SIZES.lg,
-        paddingBottom: SIZES.lg,
+        paddingBottom: SIZES.sm,
     },
     header: {
         flexDirection: 'row',
         alignItems: 'center',
         justifyContent: 'space-between',
-        paddingVertical: SIZES.base,
+        paddingVertical: SIZES.sm,
+    },
+    headerActions: {
+        flexDirection: 'row',
+        gap: SIZES.sm,
+    },
+    headerActionBtn: {
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        backgroundColor: COLORS.surfaceLight,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     greeting: {
         fontSize: SIZES.textSm,
@@ -258,18 +377,99 @@ const styles = StyleSheet.create({
         ...FONTS.extraBold,
         letterSpacing: -0.5,
     },
-    settingsBtn: {
-        width: 44,
-        height: 44,
-        borderRadius: 22,
-        backgroundColor: COLORS.surfaceLight,
+    content: {
+        flex: 1,
+    },
+    contentContainer: {
+        paddingTop: SIZES.xs,
+    },
+    // Quick Access Grid (Spotify-style chips)
+    quickAccess: {
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        paddingHorizontal: SIZES.lg,
+        gap: SIZES.sm,
+        marginBottom: SIZES.lg,
+    },
+    quickChip: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: COLORS.surface,
+        borderRadius: SIZES.radiusSm,
+        paddingRight: SIZES.md,
+        gap: SIZES.sm,
+        width: (width - SIZES.lg * 2 - SIZES.sm) / 2,
+        height: 48,
+        overflow: 'hidden',
+    },
+    chipIcon: {
+        width: 48,
+        height: 48,
         alignItems: 'center',
         justifyContent: 'center',
+        borderRadius: SIZES.radiusSm,
     },
+    chipCover: {
+        width: 48,
+        height: 48,
+        borderRadius: SIZES.radiusSm,
+    },
+    chipText: {
+        flex: 1,
+        fontSize: SIZES.textSm,
+        color: COLORS.textPrimary,
+        ...FONTS.semiBold,
+    },
+    // Sections
+    section: {
+        marginBottom: SIZES.lg,
+    },
+    sectionTitle: {
+        fontSize: SIZES.textXl,
+        color: COLORS.textPrimary,
+        ...FONTS.bold,
+        paddingHorizontal: SIZES.lg,
+        marginBottom: SIZES.md,
+    },
+    sectionTitle2: {
+        fontSize: SIZES.textXl,
+        color: COLORS.textPrimary,
+        ...FONTS.bold,
+        paddingHorizontal: SIZES.lg,
+        marginBottom: SIZES.base,
+        marginTop: SIZES.sm,
+    },
+    // Recently Played horizontal cards
+    recentScroll: {
+        marginHorizontal: -SIZES.lg,
+    },
+    recentCard: {
+        width: 140,
+        marginRight: SIZES.md,
+    },
+    recentThumb: {
+        width: 140,
+        height: 140,
+        borderRadius: SIZES.radiusMd,
+        marginBottom: SIZES.sm,
+    },
+    recentTitle: {
+        fontSize: SIZES.textSm,
+        color: COLORS.textPrimary,
+        ...FONTS.medium,
+    },
+    recentArtist: {
+        fontSize: SIZES.textXs,
+        color: COLORS.textMuted,
+        ...FONTS.regular,
+        marginTop: 2,
+    },
+    // Stats
     statsRow: {
         flexDirection: 'row',
         gap: SIZES.sm,
-        marginTop: SIZES.sm,
+        paddingHorizontal: SIZES.lg,
+        marginBottom: SIZES.lg,
     },
     statCard: {
         flex: 1,
@@ -295,21 +495,10 @@ const styles = StyleSheet.create({
         ...FONTS.medium,
         marginTop: 2,
     },
-    content: {
-        flex: 1,
-    },
-    contentContainer: {
-        paddingHorizontal: SIZES.lg,
-    },
-    sectionTitle: {
-        fontSize: SIZES.textXl,
-        color: COLORS.textPrimary,
-        ...FONTS.bold,
-        marginBottom: SIZES.base,
-        marginTop: SIZES.sm,
-    },
+    // Empty state
     emptyState: {
         marginTop: SIZES.xl,
+        paddingHorizontal: SIZES.lg,
     },
     emptyCard: {
         alignItems: 'center',
@@ -352,7 +541,7 @@ const styles = StyleSheet.create({
     },
     fab: {
         position: 'absolute',
-        bottom: 90,
+        bottom: 130,
         right: SIZES.lg,
         borderRadius: SIZES.radiusFull,
         overflow: 'hidden',

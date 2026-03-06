@@ -1,22 +1,38 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import playerService from '../services/player';
+import { isFavorite, toggleFavorite } from '../services/storage';
 import { COLORS, SIZES, FONTS, SHADOWS } from '../constants/theme';
 
 export default function MiniPlayer({ playerState }) {
     const router = useRouter();
+    const insets = useSafeAreaInsets();
     const { currentTrack, isPlaying, position, duration } = playerState;
+    const [isLiked, setIsLiked] = useState(false);
+
+    useEffect(() => {
+        if (currentTrack?.id) {
+            isFavorite(currentTrack.id).then(setIsLiked);
+        }
+    }, [currentTrack?.id]);
 
     if (!currentTrack) return null;
 
     const progress = duration > 0 ? position / duration : 0;
 
+    const handleToggleLike = async () => {
+        if (!currentTrack?.id) return;
+        const nowLiked = await toggleFavorite(currentTrack.id);
+        setIsLiked(nowLiked);
+    };
+
     return (
         <TouchableOpacity
-            style={styles.container}
+            style={[styles.container, { bottom: 48 + insets.bottom }]}
             onPress={() => router.push('/player')}
             activeOpacity={0.95}
         >
@@ -68,13 +84,17 @@ export default function MiniPlayer({ playerState }) {
                     {/* Controls */}
                     <View style={styles.controls}>
                         <TouchableOpacity
-                            style={styles.controlBtn}
+                            style={styles.likeBtn}
                             onPress={(e) => {
                                 e.stopPropagation();
-                                playerService.previous();
+                                handleToggleLike();
                             }}
                         >
-                            <Ionicons name="play-skip-back" size={20} color={COLORS.textPrimary} />
+                            <Ionicons
+                                name={isLiked ? 'heart' : 'heart-outline'}
+                                size={20}
+                                color={isLiked ? COLORS.primary : COLORS.textMuted}
+                            />
                         </TouchableOpacity>
 
                         <TouchableOpacity
@@ -84,12 +104,17 @@ export default function MiniPlayer({ playerState }) {
                                 playerService.togglePlay();
                             }}
                         >
-                            <Ionicons
-                                name={isPlaying ? 'pause' : 'play'}
-                                size={24}
-                                color={COLORS.textPrimary}
-                                style={!isPlaying && { marginLeft: 2 }}
-                            />
+                            <LinearGradient
+                                colors={[COLORS.primary, COLORS.primaryDark]}
+                                style={styles.playBtnGradient}
+                            >
+                                <Ionicons
+                                    name={isPlaying ? 'pause' : 'play'}
+                                    size={24}
+                                    color="#fff"
+                                    style={!isPlaying && { marginLeft: 2 }}
+                                />
+                            </LinearGradient>
                         </TouchableOpacity>
 
                         <TouchableOpacity
@@ -111,17 +136,14 @@ export default function MiniPlayer({ playerState }) {
 const styles = StyleSheet.create({
     container: {
         position: 'absolute',
-        bottom: 0,
-        left: 0,
-        right: 0,
-        borderTopLeftRadius: SIZES.radiusMd,
-        borderTopRightRadius: SIZES.radiusMd,
+        left: 8,
+        right: 8,
+        borderRadius: SIZES.radiusMd,
         overflow: 'hidden',
         ...SHADOWS.medium,
     },
     gradient: {
-        borderTopLeftRadius: SIZES.radiusMd,
-        borderTopRightRadius: SIZES.radiusMd,
+        borderRadius: SIZES.radiusMd,
     },
     progressBar: {
         height: 2,
@@ -135,19 +157,19 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         paddingHorizontal: SIZES.md,
         paddingVertical: SIZES.sm,
-        gap: SIZES.md,
+        gap: SIZES.sm,
     },
     thumbContainer: {
         position: 'relative',
     },
     thumb: {
-        width: 48,
-        height: 48,
+        width: 44,
+        height: 44,
         borderRadius: SIZES.radiusSm,
     },
     thumbPlaceholder: {
-        width: 48,
-        height: 48,
+        width: 44,
+        height: 44,
         borderRadius: SIZES.radiusSm,
         alignItems: 'center',
         justifyContent: 'center',
@@ -173,12 +195,12 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     trackTitle: {
-        fontSize: SIZES.textBase,
+        fontSize: SIZES.textSm,
         color: COLORS.textPrimary,
         ...FONTS.semiBold,
     },
     trackArtist: {
-        fontSize: SIZES.textSm,
+        fontSize: SIZES.textXs,
         color: COLORS.textSecondary,
         ...FONTS.regular,
         marginTop: 1,
@@ -186,19 +208,30 @@ const styles = StyleSheet.create({
     controls: {
         flexDirection: 'row',
         alignItems: 'center',
-        gap: SIZES.xs,
+        gap: 4,
+    },
+    likeBtn: {
+        width: 34,
+        height: 34,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     controlBtn: {
-        width: 36,
-        height: 36,
+        width: 34,
+        height: 34,
+        borderRadius: 17,
         alignItems: 'center',
         justifyContent: 'center',
     },
     playBtn: {
+        borderRadius: 20,
+        overflow: 'hidden',
+        ...SHADOWS.glow,
+    },
+    playBtnGradient: {
         width: 40,
         height: 40,
         borderRadius: 20,
-        backgroundColor: COLORS.surfaceHighlight,
         alignItems: 'center',
         justifyContent: 'center',
     },

@@ -102,46 +102,81 @@ function getCached(videoId) {
 // ---------------------------------------------------------------------------
 const inProgress = new Map();
 
+// Quick metadata fetch (no download, ~1-2 sec)
+async function fetchMetadata(videoId) {
+    const cached = getCached(videoId);
+    if (cached && cached.title && cached.title !== 'Unknown') return cached;
+
+    try {
+        const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
+        const result = await new Promise((resolve, reject) => {
+            execFile(YT_DLP, [
+                ytUrl, '--no-download', '--no-warnings', '--no-check-certificates',
+                '--no-playlist', '--print', '%(title)s\t%(channel)s\t%(duration)s\t%(thumbnail)s',
+            ], { timeout: 15000, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
+                (err, stdout) => {
+                    if (err) return reject(err);
+                    const line = (stdout || '').trim();
+                    const parts = line.split('\t');
+                    resolve({
+                        title: parts[0] || 'Unknown',
+                        channel: parts[1] || 'Unknown Artist',
+                        duration: parseInt(parts[2]) || 0,
+                        thumbnail: parts[3] || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+                    });
+                });
+        });
+        urlCache.set(videoId, { videoId, ...result, artist: result.channel, audioUrl: '', ext: 'mp3', timestamp: Date.now() });
+        return result;
+    } catch (e) {
+        console.warn(`[meta] Failed for ${videoId}:`, e.message);
+        return { title: 'Unknown', channel: 'Unknown Artist', duration: 0, thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` };
+    }
+}
+
 async function downloadAndConvert(videoId) {
     const mp3Path = path.join(TEMP_DIR, `${videoId}.mp3`);
 
-    // Already done?
+    // Already done? Just fetch metadata if needed
     if (fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 50000) {
-        return { cached: true, mp3Path, meta: getCached(videoId) || {} };
+        const meta = await fetchMetadata(videoId);
+        return { cached: true, mp3Path, meta };
     }
 
     // Already in progress? Wait for it
     if (inProgress.has(videoId)) {
         await inProgress.get(videoId).catch(() => { });
         if (fs.existsSync(mp3Path) && fs.statSync(mp3Path).size > 50000) {
-            return { cached: true, mp3Path, meta: getCached(videoId) || {} };
+            const meta = await fetchMetadata(videoId);
+            return { cached: true, mp3Path, meta };
         }
     }
 
     const ytUrl = `https://www.youtube.com/watch?v=${videoId}`;
     console.log(`[yt-dlp] Downloading + converting: ${videoId}`);
 
+    // Fetch metadata in parallel (fast, no download)
+    const metaPromise = fetchMetadata(videoId);
+
+    // Download + convert (NO --print flag — it prevents download!)
     const downloadPromise = new Promise((resolve, reject) => {
         const outBase = path.join(TEMP_DIR, videoId);
         const proc = spawn(YT_DLP, [
             ytUrl,
-            '-x',                             // extract audio only
-            '--audio-format', 'mp3',          // convert to MP3
-            '--audio-quality', '2',           // VBR ~190kbps
+            '-x',
+            '--audio-format', 'mp3',
+            '--audio-quality', '2',
             '-f', 'bestaudio[ext=m4a]/bestaudio/best',
             '--no-playlist',
             '--no-warnings',
             '--no-check-certificates',
             '--ffmpeg-location', path.dirname(FFMPEG),
             '-o', outBase + '.%(ext)s',
-            '--print-json',                   // metadata to stdout
         ], {
             env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
         });
 
-        let stdout = '';
         let stderr = '';
-        proc.stdout.on('data', d => { stdout += d.toString(); });
         proc.stderr.on('data', d => { stderr += d.toString(); });
 
         const timer = setTimeout(() => {
@@ -155,8 +190,6 @@ async function downloadAndConvert(videoId) {
                 const errLine = stderr.split('\n').find(l => l.includes('ERROR')) || `exit code ${code}`;
                 return reject(new Error(errLine));
             }
-
-            // Find the output MP3 file
             let found = null;
             try {
                 for (const f of fs.readdirSync(TEMP_DIR)) {
@@ -166,18 +199,11 @@ async function downloadAndConvert(videoId) {
                     }
                 }
             } catch { }
-
             if (!found) return reject(new Error('No MP3 output file'));
             if (found !== mp3Path) {
                 try { fs.renameSync(found, mp3Path); } catch { }
             }
-
-            // Parse metadata from --print-json
-            let meta = {};
-            for (const line of stdout.trim().split('\n').reverse()) {
-                try { meta = JSON.parse(line); break; } catch { }
-            }
-            resolve(meta);
+            resolve();
         });
 
         proc.on('error', err => { clearTimeout(timer); reject(err); });
@@ -185,8 +211,7 @@ async function downloadAndConvert(videoId) {
 
     inProgress.set(videoId, downloadPromise);
     try {
-        const meta = await downloadPromise;
-        // Cache metadata
+        const [meta] = await Promise.all([metaPromise, downloadPromise]);
         urlCache.set(videoId, {
             videoId,
             title: meta.title || 'Unknown',

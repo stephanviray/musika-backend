@@ -9,8 +9,7 @@ import { createPlaylist, addTrack, updatePlaylist } from './storage';
 import { showDownloadProgress, showDownloadComplete, dismissDownloadNotification } from './downloadNotification';
 import Constants from 'expo-constants';
 
-let MediaLibrary = null;
-try { MediaLibrary = require('expo-media-library'); } catch { }
+import * as MediaLibrary from 'expo-media-library';
 
 // ---------------------------------------------------------------------------
 // FileSystem setup (native only — web can't save files)
@@ -27,28 +26,21 @@ async function ensureMusicDir() {
 }
 
 // Save a copy to the device's media library (visible in Files/Music apps)
-async function saveToDevice(filePath, fileName) {
-    if (!MediaLibrary || Platform.OS !== 'android') return;
+export async function saveToDevice(filePath, fileName, playlistName) {
+    if (Platform.OS !== 'android') return null;
     try {
         const { status } = await MediaLibrary.requestPermissionsAsync();
         if (status !== 'granted') {
             console.warn('[DL] Media library permission denied');
-            return;
+            return null;
         }
+        // Save directly to media library — visible in Music/Audio folder
         const asset = await MediaLibrary.createAssetAsync(filePath);
-        try {
-            let album = await MediaLibrary.getAlbumAsync('Musika');
-            if (!album) {
-                await MediaLibrary.createAlbumAsync('Musika', asset, false);
-            } else {
-                await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
-            }
-        } catch {
-            // Album creation may fail on some devices, but the asset is still saved
-        }
-        console.log(`[DL] ✓ Saved to device: ${fileName}`);
+        console.log(`[DL] ✓ Saved to Music: ${fileName}`);
+        return asset.id;
     } catch (e) {
-        console.warn(`[DL] Save to device failed:`, e.message);
+        console.warn(`[DL] Save to device failed for ${fileName}:`, e.message);
+        return null;
     }
 }
 
@@ -255,8 +247,6 @@ export async function downloadTrack(videoId, onProgress) {
             console.log(`[DL] ✓ ${safeTitle} (${(saved.size / 1024 / 1024).toFixed(1)}MB)`);
             onProgress?.(1);
 
-            await saveToDevice(finalUri, `${safeTitle}.mp3`);
-
             return {
                 videoId, title, artist, duration, thumbnail,
                 filePath: finalUri, fileSize: saved.size,
@@ -375,8 +365,15 @@ async function importYouTubePlaylist(url, notify) {
         }
 
         // Save all results in order (including partial if cancelled)
-        for (const { video, track, success } of results) {
+        for (const entry of results) {
+            if (!entry) continue; // Skip unfilled slots (cancelled)
+            const { video, track, success } = entry;
             if (success && track) {
+                // Save to device storage (visible in Files/Music)
+                if (track.filePath && track.downloaded) {
+                    const safeName = (track.title || 'track').replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 50).trim();
+                    await saveToDevice(track.filePath, `${safeName}.mp3`, playlistTitle);
+                }
                 await addTrack(playlist.id, {
                     title: track.title || video.title,
                     artist: track.artist || video.artist,
@@ -418,6 +415,11 @@ async function importYouTubePlaylist(url, notify) {
         }
 
         const playlist = await createPlaylist(track.title || 'YouTube Track', 'youtube', url);
+        // Save to device storage
+        if (track.filePath) {
+            const safeName = (track.title || 'track').replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 50).trim();
+            await saveToDevice(track.filePath, `${safeName}.mp3`, track.title || 'YouTube Track');
+        }
         await addTrack(playlist.id, {
             title: track.title,
             artist: track.artist,
@@ -515,6 +517,25 @@ export async function deleteAudioFile(filePath) {
         if (info.exists) await FileSystem.deleteAsync(filePath);
     } catch (e) {
         console.error('Delete error:', e);
+    }
+    // Also remove from Media Library (device's Music folder)
+    if (Platform.OS === 'android') {
+        try {
+            const fileName = filePath.split('/').pop();
+            if (fileName) {
+                const assets = await MediaLibrary.getAssetsAsync({
+                    mediaType: 'audio',
+                    first: 1000,
+                });
+                const match = assets.assets.find(a => a.filename === fileName);
+                if (match) {
+                    await MediaLibrary.deleteAssetsAsync([match.id]);
+                    console.log(`[DL] ✓ Removed from device: ${fileName}`);
+                }
+            }
+        } catch (e) {
+            console.warn('[DL] MediaLibrary cleanup failed:', e.message);
+        }
     }
 }
 
