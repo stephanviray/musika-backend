@@ -238,9 +238,13 @@ export async function getPlaylistVideos(url) {
   // Try proxy first
   for (const proxyUrl of getProxyUrls()) {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
       const resp = await fetch(`${proxyUrl}/youtube-playlist/${playlistId}?url=${encodeURIComponent(url)}`, {
+        signal: controller.signal,
         headers: { 'Accept': 'application/json' },
       });
+      clearTimeout(timeout);
       if (resp.ok) {
         const data = await resp.json();
         if (data.videos?.length > 0) {
@@ -253,9 +257,13 @@ export async function getPlaylistVideos(url) {
     }
   }
 
-  // Fallback to youtubei.js
+  // Fallback to youtubei.js (with timeout)
   const yt = await getYT();
-  const playlist = await yt.getPlaylist(playlistId);
+  const playlistPromise = yt.getPlaylist(playlistId);
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Innertube playlist fetch timed out (30s)')), 30000)
+  );
+  const playlist = await Promise.race([playlistPromise, timeoutPromise]);
 
   const videos = playlist.videos.map(v => ({
     videoId: v.id,
